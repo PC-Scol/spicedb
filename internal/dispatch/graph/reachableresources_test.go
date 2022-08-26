@@ -42,6 +42,13 @@ func TestSimpleReachableResources(t *testing.T) {
 			[]reachableResource{},
 		},
 		{
+			RR("document", "*"),
+			ONR("user", "eng_lead", "..."),
+			[]reachableResource{
+				reachable(ONR("document", "masterplan", "*"), true),
+			},
+		},
+		{
 			RR("document", "view"),
 			ONR("user", "eng_lead", "..."),
 			[]reachableResource{
@@ -75,6 +82,15 @@ func TestSimpleReachableResources(t *testing.T) {
 			ONR("user", "multiroleguy", "..."),
 			[]reachableResource{
 				reachable(ONR("document", "specialplan", "view_and_edit"), false),
+			},
+		},
+		// same reachable resource is returned twice since it is reachable from 2 relations
+		{
+			RR("document", "*"),
+			ONR("user", "multiroleguy", "..."),
+			[]reachableResource{
+				reachable(ONR("document", "specialplan", "*"), true),
+				reachable(ONR("document", "specialplan", "*"), true),
 			},
 		},
 		{
@@ -111,6 +127,14 @@ func TestSimpleReachableResources(t *testing.T) {
 			[]reachableResource{
 				reachable(ONR("document", "healthplan", "view"), true),
 				reachable(ONR("document", "masterplan", "view"), true),
+			},
+		},
+		{
+			RR("document", "*"),
+			ONR("user", "chief_financial_officer", "..."),
+			[]reachableResource{
+				reachable(ONR("document", "healthplan", "*"), true),
+				reachable(ONR("document", "masterplan", "*"), true),
 			},
 		},
 		{

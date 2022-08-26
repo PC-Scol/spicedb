@@ -37,6 +37,31 @@ type ValidatedReachableResourcesRequest struct {
 	Revision decimal.Decimal
 }
 
+// Returns a new request overriding the resourceRelation if needed
+func NewValidatedReachableResourcesRequest(req *ValidatedReachableResourcesRequest, resourceRelation string) *ValidatedReachableResourcesRequest {
+	if req.ResourceRelation.Relation == resourceRelation {
+		return req
+	} else {
+		return &ValidatedReachableResourcesRequest{
+			DispatchReachableResourcesRequest: &v1.DispatchReachableResourcesRequest{
+				Metadata: req.Metadata,
+				ResourceRelation: &core.RelationReference{
+					Namespace: req.ResourceRelation.Namespace,
+					Relation:  resourceRelation,
+				},
+				SubjectRelation: req.SubjectRelation,
+				SubjectIds:      req.SubjectIds,
+			},
+			Revision: req.Revision,
+		}
+	}
+}
+
+type RequestAndEntryPoints struct {
+	req         ValidatedReachableResourcesRequest
+	entrypoints []namespace.ReachabilityEntrypoint
+}
+
 type syncONRSet struct {
 	items sync.Map
 }
@@ -76,18 +101,39 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 	// Load the type system and reachability graph to find the entrypoints for the reachability.
 	ds := datastoremw.MustFromContext(ctx)
 	reader := ds.SnapshotReader(req.Revision)
-	_, typeSystem, err := namespace.ReadNamespaceAndTypes(ctx, req.ResourceRelation.Namespace, reader)
+	namespaceDefinition, typeSystem, err := namespace.ReadNamespaceAndTypes(ctx, req.ResourceRelation.Namespace, reader)
 	if err != nil {
 		return err
 	}
 
+	// resolving resourceRelation wildcard
+	var resourceRelations []string
+	if req.ResourceRelation.Relation == tuple.PublicWildcard {
+		for _, relation := range namespaceDefinition.Relation {
+			resourceRelations = append(resourceRelations, relation.Name)
+		}
+	} else {
+		resourceRelations = append(resourceRelations, req.ResourceRelation.Relation)
+	}
+
 	rg := namespace.ReachabilityGraphFor(typeSystem.AsValidated())
-	entrypoints, err := rg.OptimizedEntrypointsForSubjectToResource(ctx, &core.RelationReference{
-		Namespace: req.SubjectRelation.Namespace,
-		Relation:  req.SubjectRelation.Relation,
-	}, req.ResourceRelation)
-	if err != nil {
-		return err
+	collectedEntryPoints := []*RequestAndEntryPoints{}
+	for _, resourceRelation := range resourceRelations {
+
+		entrypoints, err := rg.OptimizedEntrypointsForSubjectToResource(ctx, &core.RelationReference{
+			Namespace: req.SubjectRelation.Namespace,
+			Relation:  req.SubjectRelation.Relation,
+		}, &core.RelationReference{
+			Namespace: req.ResourceRelation.Namespace,
+			Relation:  resourceRelation,
+		})
+		if err != nil {
+			return err
+		}
+		collectedEntryPoints = append(collectedEntryPoints, &RequestAndEntryPoints{
+			req:         *NewValidatedReachableResourcesRequest(&req, resourceRelation),
+			entrypoints: entrypoints,
+		})
 	}
 
 	cancelCtx, checkCancel := context.WithCancel(ctx)
@@ -96,36 +142,49 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 	g, subCtx := errgroup.WithContext(cancelCtx)
 	g.SetLimit(int(crr.concurrencyLimit))
 
-	// For each entrypoint, load the necessary data and re-dispatch if a subproblem was found.
-	for _, entrypoint := range entrypoints {
-		switch entrypoint.EntrypointKind() {
-		case core.ReachabilityEntrypoint_RELATION_ENTRYPOINT:
-			err := crr.lookupRelationEntrypoint(subCtx, entrypoint, rg, g, reader, req, stream, dispatched)
-			if err != nil {
-				return err
-			}
+	// For each resourceRelation to traverse
+	for _, requestAndEntrypoint := range collectedEntryPoints {
+		// For each entrypoint, load the necessary data and re-dispatch if a subproblem was found.
+		for _, entrypoint := range requestAndEntrypoint.entrypoints {
+			switch entrypoint.EntrypointKind() {
+			case core.ReachabilityEntrypoint_RELATION_ENTRYPOINT:
+				err := crr.lookupRelationEntrypoint(subCtx, entrypoint, rg, g, reader, requestAndEntrypoint.req, stream, dispatched)
+				if err != nil {
+					return err
+				}
 
-		case core.ReachabilityEntrypoint_COMPUTED_USERSET_ENTRYPOINT:
-			containingRelation := entrypoint.ContainingRelationOrPermission()
-			rewrittenSubjectRelation := &core.RelationReference{
-				Namespace: containingRelation.Namespace,
-				Relation:  containingRelation.Relation,
-			}
+			case core.ReachabilityEntrypoint_COMPUTED_USERSET_ENTRYPOINT:
+				containingRelation := entrypoint.ContainingRelationOrPermission()
+				rewrittenSubjectRelation := &core.RelationReference{
+					Namespace: containingRelation.Namespace,
+					Relation:  containingRelation.Relation,
+				}
 
-			err := crr.redispatchOrReport(subCtx, rewrittenSubjectRelation, req.SubjectIds, rg, g, entrypoint, stream, req, dispatched)
-			if err != nil {
-				return err
-			}
+				err := crr.redispatchOrReport(
+					subCtx, rewrittenSubjectRelation,
+					requestAndEntrypoint.req.SubjectIds,
+					rg,
+					g,
+					entrypoint,
+					stream,
+					requestAndEntrypoint.req,
+					dispatched,
+				)
+				if err != nil {
+					return err
+				}
 
-		case core.ReachabilityEntrypoint_TUPLESET_TO_USERSET_ENTRYPOINT:
-			err := crr.lookupTTUEntrypoint(subCtx, entrypoint, rg, g, reader, req, stream, dispatched)
-			if err != nil {
-				return err
-			}
+			case core.ReachabilityEntrypoint_TUPLESET_TO_USERSET_ENTRYPOINT:
+				err := crr.lookupTTUEntrypoint(subCtx, entrypoint, rg, g, reader, requestAndEntrypoint.req, stream, dispatched)
+				if err != nil {
+					return err
+				}
 
-		default:
-			panic(fmt.Sprintf("Unknown kind of entrypoint: %v", entrypoint.EntrypointKind()))
+			default:
+				panic(fmt.Sprintf("Unknown kind of entrypoint: %v", entrypoint.EntrypointKind()))
+			}
 		}
+
 	}
 
 	return g.Wait()
