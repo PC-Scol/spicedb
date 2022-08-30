@@ -1,0 +1,25 @@
+syntax = "proto3";
+package reachability.v1;
+
+option go_package = "github.com/authzed/spicedb/pkg/proto/reachability/v1";
+
+import "validate/validate.proto";
+import "authzed/api/v1/core.proto";
+import "authzed/api/v1/permission_service.proto";
+
+service ReachablityService {
+    rpc ReachableResources(ReachableResourcesRequest) returns (stream ReachableResourcesResponse) {}
+}
+
+message ReachableResourcesRequest {
+    authzed.api.v1.Consistency consistency = 1;
+
+    authzed.api.v1.ObjectReference starting_resource = 2;
+    string target_object_type = 3;
+}
+
+message ReachableResourcesResponse {
+    authzed.api.v1.ObjectReference found_resource = 1;
+    bool direct_path = 2;
+    authzed.api.v1.ZedToken found_at = 3;
+}

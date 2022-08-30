@@ -12,6 +12,7 @@ import (
 	"github.com/authzed/spicedb/internal/services/health"
 	v1svc "github.com/authzed/spicedb/internal/services/v1"
 	v1alpha1svc "github.com/authzed/spicedb/internal/services/v1alpha1"
+	reachabilityv1 "github.com/authzed/spicedb/pkg/proto/reachability/v1"
 )
 
 // SchemaServiceOption defines the options for enabling or disabling the V1 Schema service.
@@ -56,6 +57,9 @@ func RegisterGrpcServices(
 
 	v1.RegisterPermissionsServiceServer(srv, v1svc.NewPermissionsServer(dispatch, maxDepth))
 	healthManager.RegisterReportedService(v1.PermissionsService_ServiceDesc.ServiceName)
+
+	reachabilityv1.RegisterReachablityServiceServer(srv, v1svc.NewReachabilityServer(dispatch, maxDepth))
+	healthManager.RegisterReportedService(reachabilityv1.ReachablityService_ServiceDesc.ServiceName)
 
 	if watchServiceOption == WatchServiceEnabled {
 		v1.RegisterWatchServiceServer(srv, v1svc.NewWatchServer())
