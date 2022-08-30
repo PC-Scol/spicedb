@@ -379,12 +379,12 @@ func (cd *Dispatcher) DispatchReachableResources(req *v1.DispatchReachableResour
 
 			mu.Lock()
 			defer mu.Unlock()
-
 			for _, id := range result.Resource.ResourceIds {
 				estimatedSize += int64(len(id))
 			}
 
 			toCacheResults = append(toCacheResults, adjustedResult)
+			fmt.Printf("*** cache(%s): %d\n", requestKey, len(toCacheResults))
 			return result, true, nil
 		},
 	}

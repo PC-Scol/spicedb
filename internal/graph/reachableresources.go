@@ -38,7 +38,11 @@ type ValidatedReachableResourcesRequest struct {
 }
 
 // Returns a new request overriding the resourceRelation if needed
-func NewValidatedReachableResourcesRequest(req *ValidatedReachableResourcesRequest, resourceRelation string) *ValidatedReachableResourcesRequest {
+func NewValidatedReachableResourcesRequest(
+	req *ValidatedReachableResourcesRequest,
+	resourceRelation string,
+	subjectRelation *core.RelationReference,
+) *ValidatedReachableResourcesRequest {
 	if req.ResourceRelation.Relation == resourceRelation {
 		return req
 	} else {
@@ -49,7 +53,7 @@ func NewValidatedReachableResourcesRequest(req *ValidatedReachableResourcesReque
 					Namespace: req.ResourceRelation.Namespace,
 					Relation:  resourceRelation,
 				},
-				SubjectRelation: req.SubjectRelation,
+				SubjectRelation: subjectRelation,
 				SubjectIds:      req.SubjectIds,
 			},
 			Revision: req.Revision,
@@ -85,7 +89,8 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 
 	// If the resource type matches the subject type, yield directly.
 	if req.SubjectRelation.Namespace == req.ResourceRelation.Namespace &&
-		req.SubjectRelation.Relation == req.ResourceRelation.Relation {
+		req.SubjectRelation.Relation == req.ResourceRelation.Relation &&
+		req.SubjectRelation.Relation != tuple.PublicWildcard {
 		err := stream.Publish(&v1.DispatchReachableResourcesResponse{
 			Resource: &v1.ReachableResource{
 				ResourceIds:  req.SubjectIds,
@@ -106,7 +111,7 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 		return err
 	}
 
-	// resolving resourceRelation wildcard
+	// resolving resource relation wildcard
 	var resourceRelations []string
 	if req.ResourceRelation.Relation == tuple.PublicWildcard {
 		for _, relation := range namespaceDefinition.Relation {
@@ -116,24 +121,44 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 		resourceRelations = append(resourceRelations, req.ResourceRelation.Relation)
 	}
 
-	rg := namespace.ReachabilityGraphFor(typeSystem.AsValidated())
-	collectedEntryPoints := []*RequestAndEntryPoints{}
-	for _, resourceRelation := range resourceRelations {
-
-		entrypoints, err := rg.OptimizedEntrypointsForSubjectToResource(ctx, &core.RelationReference{
-			Namespace: req.SubjectRelation.Namespace,
-			Relation:  req.SubjectRelation.Relation,
-		}, &core.RelationReference{
-			Namespace: req.ResourceRelation.Namespace,
-			Relation:  resourceRelation,
-		})
+	// resolving subject relation wildcard
+	subjectRelations := []*core.RelationReference{}
+	if req.SubjectRelation.Relation == tuple.PublicWildcard {
+		subjectRelations, err = namespace.FindRelations(
+			ctx,
+			namespace.RelationFilter{
+				Namespace: req.SubjectRelation.Namespace,
+			},
+			reader,
+		)
 		if err != nil {
 			return err
 		}
-		collectedEntryPoints = append(collectedEntryPoints, &RequestAndEntryPoints{
-			req:         *NewValidatedReachableResourcesRequest(&req, resourceRelation),
-			entrypoints: entrypoints,
-		})
+		subjectRelations = distinctRelationReferences(subjectRelations)
+	} else {
+		subjectRelations = append(subjectRelations, req.SubjectRelation)
+	}
+
+	rg := namespace.ReachabilityGraphFor(typeSystem.AsValidated())
+	collectedEntryPoints := []*RequestAndEntryPoints{}
+	for _, subjectRelation := range subjectRelations {
+		for _, resourceRelation := range resourceRelations {
+
+			entrypoints, err := rg.OptimizedEntrypointsForSubjectToResource(ctx, &core.RelationReference{
+				Namespace: subjectRelation.Namespace,
+				Relation:  subjectRelation.Relation,
+			}, &core.RelationReference{
+				Namespace: req.ResourceRelation.Namespace,
+				Relation:  resourceRelation,
+			})
+			if err != nil {
+				return err
+			}
+			collectedEntryPoints = append(collectedEntryPoints, &RequestAndEntryPoints{
+				req:         *NewValidatedReachableResourcesRequest(&req, resourceRelation, subjectRelation),
+				entrypoints: entrypoints,
+			})
+		}
 	}
 
 	cancelCtx, checkCancel := context.WithCancel(ctx)
@@ -141,6 +166,8 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 
 	g, subCtx := errgroup.WithContext(cancelCtx)
 	g.SetLimit(int(crr.concurrencyLimit))
+
+	fmt.Printf("collectedEntryPoints.length=%d\n", len(collectedEntryPoints))
 
 	// For each resourceRelation to traverse
 	for _, requestAndEntrypoint := range collectedEntryPoints {
@@ -184,7 +211,6 @@ func (crr *ConcurrentReachableResources) ReachableResources(
 				panic(fmt.Sprintf("Unknown kind of entrypoint: %v", entrypoint.EntrypointKind()))
 			}
 		}
-
 	}
 
 	return g.Wait()
@@ -473,4 +499,26 @@ func (crr *ConcurrentReachableResources) redispatchOrReport(
 		}, stream)
 	})
 	return nil
+}
+
+// Returns unique items in a slice
+func distinctRelationReferences(input []*core.RelationReference) []*core.RelationReference {
+	inResult := make(map[ComparableRelation]bool)
+	var result []*core.RelationReference
+	for _, val := range input {
+		comparableRelation := ComparableRelation{
+			Namespace: val.Namespace,
+			Relation:  val.Relation,
+		}
+		if _, ok := inResult[comparableRelation]; !ok {
+			inResult[comparableRelation] = true
+			result = append(result, val)
+		}
+	}
+	return result
+}
+
+type ComparableRelation struct {
+	Namespace string
+	Relation  string
 }

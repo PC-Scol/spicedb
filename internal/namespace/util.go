@@ -2,6 +2,7 @@ package namespace
 
 import (
 	"context"
+	"fmt"
 
 	"github.com/authzed/spicedb/pkg/datastore"
 	core "github.com/authzed/spicedb/pkg/proto/core/v1"
@@ -77,4 +78,134 @@ func ReadNamespaceAndTypes(
 
 	ts, terr := BuildNamespaceTypeSystemForDatastore(nsDef, ds)
 	return nsDef, ts, terr
+}
+
+type RelationFilter struct {
+	Namespace string
+	Relation  string
+}
+
+func FindRelations(
+	ctx context.Context,
+	filter RelationFilter,
+	ds datastore.Reader,
+) ([]*core.RelationReference, error) {
+
+	relations := []*core.RelationReference{}
+
+	namespaces, err := ds.ListNamespaces(ctx)
+	if err != nil {
+		return nil, err
+	}
+	for _, namespace := range namespaces {
+		for _, relation := range namespace.Relation {
+			if relation.UsersetRewrite != nil {
+				switch rw := relation.UsersetRewrite.RewriteOperation.(type) {
+				case *core.UsersetRewrite_Union:
+					rels, err := lookupSetRewrite(ctx, filter, rw.Union)
+					if err != nil {
+						return nil, err
+					}
+					relations = append(relations, rels...)
+				case *core.UsersetRewrite_Intersection:
+					rels, err := lookupSetRewrite(ctx, filter, rw.Intersection)
+					if err != nil {
+						return nil, err
+					}
+					relations = append(relations, rels...)
+				case *core.UsersetRewrite_Exclusion:
+					rels, err := lookupSetRewrite(ctx, filter, rw.Exclusion)
+					if err != nil {
+						return nil, err
+					}
+					relations = append(relations, rels...)
+				default:
+					return nil, fmt.Errorf("unknown kind of rewrite in relation %s#%s", filter.Namespace, relation.Name)
+				}
+			} else {
+				for _, allowedDirectRelation := range relation.TypeInformation.AllowedDirectRelations {
+					if allowedDirectRelation.Namespace == filter.Namespace {
+						relations = append(relations, &core.RelationReference{
+							Namespace: filter.Namespace,
+							Relation:  allowedDirectRelation.GetRelation(),
+						})
+					}
+				}
+			}
+		}
+	}
+	return relations, nil
+}
+
+func lookupSetRewrite(
+	ctx context.Context,
+	filter RelationFilter,
+	so *core.SetOperation,
+) ([]*core.RelationReference, error) {
+
+	results := []*core.RelationReference{}
+	for _, childOneof := range so.Child {
+		switch child := childOneof.ChildType.(type) {
+		/*case *core.SetOperation_Child_XThis:
+		log.Ctx(ctx).Trace().Msg("union")
+		return cl.lookupSetOperation(ctx, req, rw.Union, newLookupSubjectsUnion(stream))*/
+		case *core.SetOperation_Child_ComputedUserset:
+			relationsFound, err := lookupComputedUserSet(ctx, filter, child.ComputedUserset)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, relationsFound...)
+		case *core.SetOperation_Child_TupleToUserset:
+			relationsFound, err := lookupTupleToUserset(ctx, filter, child.TupleToUserset)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, relationsFound...)
+		case *core.SetOperation_Child_UsersetRewrite:
+			relationsFound, err := lookupUsersetRewrite(ctx, filter, child.UsersetRewrite)
+			if err != nil {
+				return nil, err
+			}
+			results = append(results, relationsFound...)
+		default:
+			return nil, fmt.Errorf("unknown kind of rewrite in lookup subjects")
+		}
+	}
+	return results, nil
+}
+
+func lookupComputedUserSet(
+	ctx context.Context,
+	filter RelationFilter,
+	cu *core.ComputedUserset,
+) ([]*core.RelationReference, error) {
+
+	// TODO implement
+	// Note: not sure, but I believe we are not interested in userRewrite during RR calls
+	// so we can leave as is
+	return []*core.RelationReference{}, nil
+}
+
+func lookupTupleToUserset(
+	ctx context.Context,
+	filter RelationFilter,
+	ttu *core.TupleToUserset,
+) ([]*core.RelationReference, error) {
+
+	// TODO implement
+	// Note: not sure, but I believe we are not interested in userRewrite during RR calls
+	// so we can leave as is
+	return []*core.RelationReference{}, nil
+}
+
+func lookupUsersetRewrite(
+	ctx context.Context,
+	filter RelationFilter,
+	usr *core.UsersetRewrite,
+) ([]*core.RelationReference, error) {
+
+	// TODO implement
+	// Note: not sure, but I believe we are not interested in userRewrite during RR calls
+	// so we can leave as is
+	return []*core.RelationReference{}, nil
 }
